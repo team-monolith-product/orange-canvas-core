@@ -117,7 +117,7 @@ class TestMainWindow(TestMainWindowBase):
         dock.setExpanded(False)
         a = w.quick_category.actions()[0]
         with patch(
-            "orangecanvas.application.canvastooldock.CategoryPopupMenu.exec",
+            "orangecanvas.application.canvastooldock.CategoryPopupMenu.popup",
             return_value=None,
         ):
             w.on_quick_category_action(a)
@@ -177,16 +177,13 @@ class TestMainWindowLoad(TestMainWindowBase):
 
         w.current_document().setPath("")
 
-        def exec(myself):
+        def _open_and_accept(myself):
             myself.setOption(QFileDialog.DontUseNativeDialog)
             myself.setOption(QFileDialog.DontConfirmOverwrite)
             myself.selectFile(self.filename)
             myself.accept()
-            return True
 
-        with (patch("AnyQt.QtWidgets.QFileDialog.exec", exec),
-              patch("AnyQt.QtWidgets.QMessageBox.question",
-                    new=Mock(return_value=QMessageBox.Yes))):
+        with patch("AnyQt.QtWidgets.QFileDialog.open", _open_and_accept):
             w.save_scheme()
             self.assertTrue(os.path.samefile(w.current_document().path(), self.filename))
 
@@ -194,13 +191,15 @@ class TestMainWindowLoad(TestMainWindowBase):
         w = self.w
         scheme = w.current_document().scheme()
         scheme.load_from(io.BytesIO(TEST_OWS), registry=w.widget_registry)
-        with patch("AnyQt.QtWidgets.QFileDialog.exec"):
+
+        def _open_and_accept(myself):
+            myself.setOption(QFileDialog.DontUseNativeDialog)
+            myself.setOption(QFileDialog.DontConfirmOverwrite)
+            myself.selectFile(self.filename)
+            myself.accept()
+
+        with patch("AnyQt.QtWidgets.QFileDialog.open", _open_and_accept):
             w.save_as_svg()
-            dialog = w.findChild(QFileDialog, "save-as-svg-filedialog")
-            dialog.setOption(QFileDialog.DontUseNativeDialog)
-            dialog.setOption(QFileDialog.DontConfirmOverwrite)
-            dialog.selectFile(self.filename)
-            dialog.accept()
         with open(self.filename, "rb") as f:
             contents = f.read()
         self.assertIn(b"<svg", contents)
@@ -313,14 +312,23 @@ class TestMainWindowLoad(TestMainWindowBase):
 
     def test_open_ows_req(self):
         w = self.w
+
+        def _auto_click_button(button_role):
+            """Patch QMessageBox.open to immediately click a button."""
+            def _open(self):
+                btn = self.button(button_role)
+                if btn is not None:
+                    btn.click()
+            return _open
+
         with temp_named_file(TEST_OWS_REQ.decode()) as f:
-            with patch("AnyQt.QtWidgets.QMessageBox.exec",
-                       return_value=QMessageBox.Ignore):
+            with patch.object(QMessageBox, "open",
+                              _auto_click_button(QMessageBox.Ignore)):
                 w.load_scheme(f)
                 self.assertEqual(w.current_document().path(), f)
 
-            with patch("AnyQt.QtWidgets.QMessageBox.exec",
-                       return_value=QMessageBox.Abort):
+            with patch.object(QMessageBox, "open",
+                              _auto_click_button(QMessageBox.Abort)):
                 w.load_scheme(f)
                 self.assertEqual(w.current_document().path(), f)
 
@@ -331,10 +339,12 @@ class TestMainWindowLoad(TestMainWindowBase):
                 for name in names
             ]
 
+        def _reject_on_open(self):
+            self.reject()
+
         w = self.w
         with patch.object(addons, "query_pypi", query), \
-             patch.object(addons.AddonManagerDialog, "exec",
-                          return_value=QDialog.Rejected):
+             patch.object(addons.AddonManagerDialog, "open", _reject_on_open):
             w.install_requirements(["uber-package-shiny", "spasm"])
 
     def test_load_unsupported_format(self):

@@ -371,7 +371,13 @@ def merged_color(a: QColor, b: QColor, factor=0.5) -> QColor:
 def message_critical(text, title=None, informative_text=None, details=None,
                      buttons=None, default_button=None, exc_info=False,
                      parent=None):
-    """Show a critical message.
+    """Show a critical message box (non-blocking).
+
+    The message box is shown via `open()` and will be automatically
+    deleted when closed (`WA_DeleteOnClose`).
+
+    Returns the `QMessageBox` instance. Connect to its `finished`
+    signal to respond to the user's choice.
     """
     if not text:
         text = "An unexpected error occurred."
@@ -379,14 +385,22 @@ def message_critical(text, title=None, informative_text=None, details=None,
     if title is None:
         title = "Error"
 
-    return message(QMessageBox.Critical, text, title, informative_text,
+    mbox = message(QMessageBox.Critical, text, title, informative_text,
                    details, buttons, default_button, exc_info, parent)
+    mbox.open()
+    return mbox
 
 
 def message_warning(text, title=None, informative_text=None, details=None,
                     buttons=None, default_button=None, exc_info=False,
                     parent=None):
-    """Show a warning message.
+    """Show a warning message box (non-blocking).
+
+    The message box is shown via `open()` and will be automatically
+    deleted when closed (`WA_DeleteOnClose`).
+
+    Returns the `QMessageBox` instance. Connect to its `finished`
+    signal to respond to the user's choice.
     """
     if not text:
         import random
@@ -398,38 +412,61 @@ def message_warning(text, title=None, informative_text=None, details=None,
     if title is not None:
         title = "Warning"
 
-    return message(QMessageBox.Warning, text, title, informative_text,
+    mbox = message(QMessageBox.Warning, text, title, informative_text,
                    details, buttons, default_button, exc_info, parent)
+    mbox.open()
+    return mbox
 
 
 def message_information(text, title=None, informative_text=None, details=None,
                         buttons=None, default_button=None, exc_info=False,
                         parent=None):
-    """Show an information message box.
+    """Show an information message box (non-blocking).
+
+    The message box is shown via `open()` and will be automatically
+    deleted when closed (`WA_DeleteOnClose`).
+
+    Returns the `QMessageBox` instance. Connect to its `finished`
+    signal to respond to the user's choice.
     """
     if title is None:
         title = "Information"
     if not text:
         text = "I am not a number."
 
-    return message(QMessageBox.Information, text, title, informative_text,
+    mbox = message(QMessageBox.Information, text, title, informative_text,
                    details, buttons, default_button, exc_info, parent)
+    mbox.open()
+    return mbox
 
 
 def message_question(text, title, informative_text=None, details=None,
                      buttons=None, default_button=None, exc_info=False,
                      parent=None):
-    """Show an message box asking the user to select some
-    predefined course of action (set by buttons argument).
+    """Show a question message box (non-blocking).
 
+    The message box is shown via `open()` and will be automatically
+    deleted when closed (`WA_DeleteOnClose`).
+
+    Returns the `QMessageBox` instance. Connect to its `finished`
+    signal and use `clickedButton()`/`standardButton()` to determine
+    the user's choice.
     """
-    return message(QMessageBox.Question, text, title, informative_text,
+    mbox = message(QMessageBox.Question, text, title, informative_text,
                    details, buttons, default_button, exc_info, parent)
+    mbox.open()
+    return mbox
 
 
 def message(icon, text, title=None, informative_text=None, details=None,
             buttons=None, default_button=None, exc_info=False, parent=None):
-    """Show a message helper function.
+    """Create a configured `QMessageBox`.
+
+    The `Qt.WA_DeleteOnClose` attribute is set so the message box is
+    automatically deleted when closed.
+
+    Returns the `QMessageBox` instance. The caller is responsible for
+    showing it (e.g., via ``mbox.open()``).
     """
     if title is None:
         title = "Message"
@@ -443,6 +480,7 @@ def message(icon, text, title=None, informative_text=None, details=None,
         details = traceback.format_exc(limit=20)
 
     mbox = QMessageBox(icon, title, text, buttons, parent)
+    mbox.setAttribute(Qt.WA_DeleteOnClose)
 
     if informative_text:
         mbox.setInformativeText(informative_text)
@@ -456,7 +494,7 @@ def message(icon, text, title=None, informative_text=None, details=None,
     if default_button is not None:
         mbox.setDefaultButton(default_button)
 
-    return mbox.exec()
+    return mbox
 
 
 def innerGlowBackgroundPixmap(color, size, radius=5):

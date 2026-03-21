@@ -16,7 +16,7 @@ from AnyQt.QtWidgets import (
     QStyleFactory, QLayout)
 from AnyQt.QtGui import QStandardItemModel, QStandardItem
 from AnyQt.QtCore import (
-    Qt, QEventLoop, QAbstractItemModel, QModelIndex, QSettings,
+    Qt, QAbstractItemModel, QModelIndex, QSettings,
     Property,
     Signal)
 
@@ -225,8 +225,6 @@ class UserSettingsDialog(QMainWindow):
         self.__macUnified = sys.platform == "darwin" and self.MAC_UNIFIED
         self._manager = BindingManager(self,
                                        submitPolicy=BindingManager.AutoSubmit)
-
-        self.__loop = None
 
         self.__settings = config.settings()
         self.__setupUi()
@@ -585,25 +583,9 @@ class UserSettingsDialog(QMainWindow):
                 log.error("Error reseting %r", source.propertyName,
                           exc_info=True)
 
-    def exec(self):
-        self.__loop = QEventLoop()
-        self.show()
-        status = self.__loop.exec()
-        self.__loop = None
-        refresh_proxies()
-        return status
-
-    def exec_(self, *args, **kwargs):
-        warnings.warn(
-            "exec_ is deprecated, use exec", DeprecationWarning, stacklevel=2
-        )
-        return self.exec(*args, **kwargs)
-
     def hideEvent(self, event):
         super().hideEvent(event)
-        if self.__loop is not None:
-            self.__loop.exit(0)
-            self.__loop = None
+        refresh_proxies()
 
     def __macOnToolBarAction(self, action):
         index = action.data()

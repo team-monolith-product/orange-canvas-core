@@ -55,11 +55,9 @@ class TestMenu(QAppTestCase):
         menu.hovered.connect(hovered)
         self.app.setActiveWindow(menu)
 
+        menu.popup(QPoint(200, 200))
         self.singleShot(100, menu.close)
-        rval = menu.exec(QPoint(200, 200))
-
-        if triggered_action:
-            self.assertIs(triggered_action[0], rval)
+        self.qWait(200)
 
     def test_search(self):
         registry = QtWidgetRegistry(small_testing_registry())

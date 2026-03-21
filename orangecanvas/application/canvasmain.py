@@ -140,6 +140,7 @@ class CanvasMainWindow(QMainWindow):
         self.__document_title = "untitled"
         self.__first_show = True
         self.__is_transient = True
+        self.__close_confirmed = False
         self.widget_registry = None  # type: Optional[WidgetRegistry]
         self.__registry_model = None  # type: Optional[QAbstractItemModel]
         # Proxy widget registry model
@@ -978,9 +979,8 @@ class CanvasMainWindow(QMainWindow):
                 popup.adjustSize()
                 button = self.quick_category.buttonForAction(action)
                 pos = popup_position_from_source(popup, button)
-                action = popup.exec(pos)
-                if action is not None:
-                    self.on_tool_box_widget_activated(action)
+                popup.triggered.connect(self.on_tool_box_widget_activated)
+                popup.popup(pos)
 
         else:
             # Expand the dock and open the category under the triggered button
@@ -1181,7 +1181,7 @@ class CanvasMainWindow(QMainWindow):
         """
         dlg = self._open_workflow_dialog()
         dlg.fileSelected.connect(self.open_scheme_file)
-        dlg.exec()
+        dlg.open()
 
     def open_and_freeze_scheme(self):
         # type: () -> None
@@ -1191,7 +1191,7 @@ class CanvasMainWindow(QMainWindow):
         """
         dlg = self._open_workflow_dialog()
         dlg.fileSelected.connect(partial(self.open_scheme_file, freeze=True))
-        dlg.exec()
+        dlg.open()
 
     def load_scheme(self, filename):
         # type: (str) -> None
@@ -1200,29 +1200,9 @@ class CanvasMainWindow(QMainWindow):
         document, updates the recent scheme list and the loaded scheme path
         property.
         """
-        new_scheme = None  # type: Optional[Scheme]
         try:
-            with open(filename, "rb") as f:
-                res = self.check_requires(f)
-                if not res:
-                    return
-                f.seek(0, os.SEEK_SET)
-                new_scheme = self.new_scheme_from_contents_and_path(f, filename)
-        except readwrite.UnsupportedFormatVersionError:
-            mb = QMessageBox(
-                self, windowTitle=self.tr("Error"),
-                icon=QMessageBox.Critical,
-                text=self.tr("Unsupported format version"),
-                informativeText=self.tr(
-                    "The file was saved in a format not supported by this "
-                    "application."
-                ),
-                detailedText="".join(traceback.format_exc()),
-            )
-            mb.setAttribute(Qt.WA_DeleteOnClose)
-            mb.setWindowModality(Qt.WindowModal)
-            mb.open()
-        except Exception as err:
+            f = open(filename, "rb")
+        except OSError as err:
             mb = QMessageBox(
                 parent=self, windowTitle=self.tr("Error"),
                 icon=QMessageBox.Critical,
@@ -1234,8 +1214,47 @@ class CanvasMainWindow(QMainWindow):
             mb.setAttribute(Qt.WA_DeleteOnClose)
             mb.setWindowModality(Qt.WindowModal)
             mb.open()
+            return
 
-        if new_scheme is not None:
+        def _on_check_done(proceed):
+            try:
+                if not proceed:
+                    return
+                f.seek(0, os.SEEK_SET)
+                new_scheme = self.new_scheme_from_contents_and_path(
+                    f, filename
+                )
+            except readwrite.UnsupportedFormatVersionError:
+                mb = QMessageBox(
+                    self, windowTitle=self.tr("Error"),
+                    icon=QMessageBox.Critical,
+                    text=self.tr("Unsupported format version"),
+                    informativeText=self.tr(
+                        "The file was saved in a format not supported "
+                        "by this application."
+                    ),
+                    detailedText="".join(traceback.format_exc()),
+                )
+                mb.setAttribute(Qt.WA_DeleteOnClose)
+                mb.setWindowModality(Qt.WindowModal)
+                mb.open()
+                return
+            except Exception as err:
+                mb = QMessageBox(
+                    parent=self, windowTitle=self.tr("Error"),
+                    icon=QMessageBox.Critical,
+                    text=self.tr("Could not open: '{}'")
+                             .format(os.path.basename(filename)),
+                    informativeText=self.tr("Error was: {}").format(err),
+                    detailedText="".join(traceback.format_exc())
+                )
+                mb.setAttribute(Qt.WA_DeleteOnClose)
+                mb.setWindowModality(Qt.WindowModal)
+                mb.open()
+                return
+            finally:
+                f.close()
+
             self.set_scheme(new_scheme, freeze_creation=True)
 
             scheme_doc_widget = self.current_document()
@@ -1251,6 +1270,37 @@ class CanvasMainWindow(QMainWindow):
             wm = getattr(new_scheme, "widget_manager", None)
             if wm is not None:
                 wm.set_creation_policy(wm.Normal)
+
+        try:
+            self.check_requires(f, on_finished=_on_check_done)
+        except readwrite.UnsupportedFormatVersionError:
+            f.close()
+            mb = QMessageBox(
+                self, windowTitle=self.tr("Error"),
+                icon=QMessageBox.Critical,
+                text=self.tr("Unsupported format version"),
+                informativeText=self.tr(
+                    "The file was saved in a format not supported "
+                    "by this application."
+                ),
+                detailedText="".join(traceback.format_exc()),
+            )
+            mb.setAttribute(Qt.WA_DeleteOnClose)
+            mb.setWindowModality(Qt.WindowModal)
+            mb.open()
+        except Exception as err:
+            f.close()
+            mb = QMessageBox(
+                parent=self, windowTitle=self.tr("Error"),
+                icon=QMessageBox.Critical,
+                text=self.tr("Could not open: '{}'")
+                         .format(os.path.basename(filename)),
+                informativeText=self.tr("Error was: {}").format(err),
+                detailedText="".join(traceback.format_exc())
+            )
+            mb.setAttribute(Qt.WA_DeleteOnClose)
+            mb.setWindowModality(Qt.WindowModal)
+            mb.open()
 
     def new_scheme_from(self, filename):
         # type: (str) -> Optional[Scheme]
@@ -1330,61 +1380,85 @@ class CanvasMainWindow(QMainWindow):
             )
         return new_scheme
 
-    def check_requires(self, fileobj: IO) -> bool:
+    def check_requires(self, fileobj, on_finished=None):
+        """Check if workflow requires missing add-ons.
+
+        The *on_finished* callback, if provided, is called with `True`
+        to proceed with loading or `False` to abort.
+        """
         requires = scheme_requires(fileobj, self.widget_registry)
         requires = [req for req in requires if not is_requirement_available(req)]
-        if requires:
-            details_ = [
-                "<h4>Required packages:</h4><ul>",
-                *["<li>{}</li>".format(escape(r)) for r in requires],
-                "</ul>"
-            ]
-            details = "".join(details_)
-            mb = QMessageBox(
-                parent=self,
-                objectName="install-requirements-message-box",
-                icon=QMessageBox.Question,
-                windowTitle="Install Additional Packages",
-                text="Workflow you are trying to load contains widgets "
-                     "from missing add-ons."
-                     "<br/>" + details + "<br/>"
-                     "Would you like to install them now?",
-                standardButtons=QMessageBox.Ok | QMessageBox.Abort |
-                                QMessageBox.Ignore,
-                informativeText=(
-                    "After installation you will have to restart the "
-                    "application and reopen the workflow."),
-            )
-            mb.setDefaultButton(QMessageBox.Ok)
-            bok = mb.button(QMessageBox.Ok)
-            bok.setText("Install add-ons")
-            bignore = mb.button(QMessageBox.Ignore)
-            bignore.setText("Ignore missing widgets")
-            bignore.setToolTip(
-                "Load partial workflow by omitting missing nodes and links."
-            )
-            mb.setWindowModality(Qt.WindowModal)
-            mb.setAttribute(Qt.WA_DeleteOnClose, True)
-            status = mb.exec()
-            if status == QMessageBox.Abort:
-                return False
-            elif status == QMessageBox.Ignore:
-                return True
+        if not requires:
+            if on_finished is not None:
+                on_finished(True)
+            return
 
-            status = self.install_requirements(requires)
+        details_ = [
+            "<h4>Required packages:</h4><ul>",
+            *["<li>{}</li>".format(escape(r)) for r in requires],
+            "</ul>"
+        ]
+        details = "".join(details_)
+        mb = QMessageBox(
+            parent=self,
+            objectName="install-requirements-message-box",
+            icon=QMessageBox.Question,
+            windowTitle="Install Additional Packages",
+            text="Workflow you are trying to load contains widgets "
+                 "from missing add-ons."
+                 "<br/>" + details + "<br/>"
+                 "Would you like to install them now?",
+            standardButtons=QMessageBox.Ok | QMessageBox.Abort |
+                            QMessageBox.Ignore,
+            informativeText=(
+                "After installation you will have to restart the "
+                "application and reopen the workflow."),
+        )
+        mb.setDefaultButton(QMessageBox.Ok)
+        bok = mb.button(QMessageBox.Ok)
+        bok.setText("Install add-ons")
+        bignore = mb.button(QMessageBox.Ignore)
+        bignore.setText("Ignore missing widgets")
+        bignore.setToolTip(
+            "Load partial workflow by omitting missing nodes and links."
+        )
+        mb.setWindowModality(Qt.WindowModal)
+        mb.setAttribute(Qt.WA_DeleteOnClose, True)
 
-            if status == QDialog.Rejected:
-                return False
+        def _on_mb_finished(_):
+            button = mb.standardButton(mb.clickedButton())
+            if button == QMessageBox.Abort:
+                if on_finished is not None:
+                    on_finished(False)
+            elif button == QMessageBox.Ignore:
+                if on_finished is not None:
+                    on_finished(True)
             else:
-                message_information(
-                    title="Please Restart",
-                    text="Please restart and reopen the file.",
-                    parent=self
+                # Ok → install requirements
+                def _on_install_finished(status):
+                    if status == QDialog.Rejected:
+                        if on_finished is not None:
+                            on_finished(False)
+                    else:
+                        message_information(
+                            title="Please Restart",
+                            text="Please restart and reopen the file.",
+                            parent=self
+                        )
+                        if on_finished is not None:
+                            on_finished(False)
+                self.install_requirements(
+                    requires, on_finished=_on_install_finished
                 )
-                return False
-        return True
+        mb.finished.connect(_on_mb_finished)
+        mb.open()
 
-    def install_requirements(self, requires: Sequence[str]) -> int:
+    def install_requirements(self, requires, on_finished=None):
+        """Install required add-on packages.
+
+        The *on_finished* callback, if provided, is called with
+        `QDialog.Accepted` or `QDialog.Rejected`.
+        """
         dlg = addons.AddonManagerDialog(
             parent=self, windowTitle="Install required packages",
             enableFilterAndAdd=False,
@@ -1392,6 +1466,7 @@ class CanvasMainWindow(QMainWindow):
         )
         dlg.setStyle(QApplication.style())
         dlg.setConfig(config.default)
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
         req = addons.Requirement
         names = [req(r).name for r in requires]
         normalized_names = {normalize_name(r) for r in names}
@@ -1408,7 +1483,10 @@ class CanvasMainWindow(QMainWindow):
             dlg.setItemState(state)
         f = dlg.runQueryAndAddResults(names)
         f.add_done_callback(qinvoke(set_state, context=dlg))
-        return dlg.exec()
+
+        if on_finished is not None:
+            dlg.finished.connect(lambda result: on_finished(result))
+        dlg.open()
 
     def reload_last(self):
         # type: () -> None
@@ -1461,70 +1539,77 @@ class CanvasMainWindow(QMainWindow):
             title = scheme.title or title
         return title
 
-    def ask_save_changes(self):
-        # type: () -> int
+    def ask_save_changes(self, on_finished=None):
         """Ask the user to save the changes to the current scheme.
-        Return QDialog.Accepted if the scheme was successfully saved
-        or the user selected to discard the changes. Otherwise return
-        QDialog.Rejected.
 
+        The *on_finished* callback, if provided, is called with
+        `QDialog.Accepted` if the scheme was successfully saved or the
+        user selected to discard the changes, and `QDialog.Rejected`
+        if the user cancelled.
         """
         document = self.current_document()
         scheme = document.scheme()
         path = document.path()
         if path:
             filename = os.path.basename(document.path())
-            message = self.tr('Do you want to save changes made to %s?') % filename
+            msg = self.tr('Do you want to save changes made to %s?') % filename
         else:
-            message = self.tr('Do you want to save this workflow?')
-        selected = message_question(
-            message,
+            msg = self.tr('Do you want to save this workflow?')
+        mbox = message_question(
+            msg,
             self.tr("Save Changes?"),
             self.tr("Your changes will be lost if you do not save them."),
-            buttons=QMessageBox.Save | QMessageBox.Cancel | \
+            buttons=QMessageBox.Save | QMessageBox.Cancel |
                     QMessageBox.Discard,
             default_button=QMessageBox.Save,
             parent=self)
 
-        if selected == QMessageBox.Save:
-            return self.save_scheme()
-        elif selected == QMessageBox.Discard:
-            return QDialog.Accepted
-        elif selected == QMessageBox.Cancel:
-            return QDialog.Rejected
-        else:
-            assert False
+        def _on_mbox_finished(_):
+            button = mbox.standardButton(mbox.clickedButton())
+            if button == QMessageBox.Save:
+                self.save_scheme(on_finished=on_finished)
+            elif button == QMessageBox.Discard:
+                if on_finished is not None:
+                    on_finished(QDialog.Accepted)
+            elif button == QMessageBox.Cancel:
+                if on_finished is not None:
+                    on_finished(QDialog.Rejected)
+        mbox.finished.connect(_on_mbox_finished)
 
-    def save_scheme(self):
-        # type: () -> int
-        """Save the current scheme. If the scheme does not have an associated
-        path then prompt the user to select a scheme file. Return
-        QDialog.Accepted if the scheme was successfully saved and
-        QDialog.Rejected if the user canceled the file selection.
+    def save_scheme(self, on_finished=None):
+        """Save the current scheme.
+
+        If the scheme does not have an associated path then prompt
+        the user to select a scheme file via `save_scheme_as`.
+
+        The *on_finished* callback, if provided, is called with
+        `QDialog.Accepted` or `QDialog.Rejected`.
         """
         document = self.current_document()
         curr_scheme = document.scheme()
         if curr_scheme is None:
-            return QDialog.Rejected
-        assert curr_scheme is not None
+            if on_finished is not None:
+                on_finished(QDialog.Rejected)
+            return
         path = document.path()
 
         if path:
             if self.save_scheme_to(curr_scheme, path):
                 document.setModified(False)
                 self.add_recent_scheme(curr_scheme.title, document.path())
-                return QDialog.Accepted
+                if on_finished is not None:
+                    on_finished(QDialog.Accepted)
             else:
-                return QDialog.Rejected
+                if on_finished is not None:
+                    on_finished(QDialog.Rejected)
         else:
-            return self.save_scheme_as()
+            self.save_scheme_as(on_finished=on_finished)
 
-    def save_scheme_as(self):
-        # type: () -> int
-        """
-        Save the current scheme by asking the user for a filename. Return
-        `QFileDialog.Accepted` if the scheme was saved successfully and
-        `QFileDialog.Rejected` if not.
+    def save_scheme_as(self, on_finished=None):
+        """Save the current scheme by asking the user for a filename.
+
+        The *on_finished* callback, if provided, is called with
+        `QFileDialog.Accepted` or `QFileDialog.Rejected`.
         """
         document = self.current_document()
         curr_scheme = document.scheme()
@@ -1552,21 +1637,28 @@ class CanvasMainWindow(QMainWindow):
             defaultSuffix=".ows"
         )
         dialog.setNameFilter(self.tr("Orange Workflow (*.ows)"))
-        # `deleteLater` can be ivoked before `exec` as PyQt 6.9 doc says, that
-        # it is activated after `exec`, and work on PyQt 5 version well (here)
-        dialog.deleteLater()
-        # dialog.exec waits for user action
-        if dialog.exec():
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
+
+        def _on_accepted():
             filename = dialog.selectedFiles()[0]
             settings.setValue("last-scheme-dir", os.path.dirname(filename))
             if self.save_scheme_to(curr_scheme, filename):
                 document.setPath(filename)
                 document.setModified(False)
                 self.add_recent_scheme(curr_scheme.title, document.path())
+                if on_finished is not None:
+                    on_finished(QFileDialog.Accepted)
+            else:
+                if on_finished is not None:
+                    on_finished(QFileDialog.Rejected)
 
-                return QFileDialog.Accepted
+        def _on_rejected():
+            if on_finished is not None:
+                on_finished(QFileDialog.Rejected)
 
-        return QFileDialog.Rejected
+        dialog.accepted.connect(_on_accepted)
+        dialog.rejected.connect(_on_rejected)
+        dialog.open()
 
     def save_scheme_to(self, scheme, filename):
         # type: (Scheme, str) -> bool
@@ -1734,7 +1826,7 @@ class CanvasMainWindow(QMainWindow):
         """
         title = self.tr('Restore unsaved changes from crash?')
         name = QApplication.applicationName() or "Orange"
-        selected = message_information(
+        mbox = message_information(
             title,
             self.tr("Restore Changes?"),
             self.tr("{} seems to have crashed at some point.\n"
@@ -1743,14 +1835,13 @@ class CanvasMainWindow(QMainWindow):
             default_button=QMessageBox.Yes,
             parent=self)
 
-        if selected == QMessageBox.Yes:
-            self.load_swp()
-            return True
-        elif selected == QMessageBox.No:
-            self.clear_swp()
-            return False
-        else:
-            assert False
+        def _on_finished(_):
+            button = mbox.standardButton(mbox.clickedButton())
+            if button == QMessageBox.Yes:
+                self.load_swp()
+            elif button == QMessageBox.No:
+                self.clear_swp()
+        mbox.finished.connect(_on_finished)
 
     def load_swp(self):
         """
@@ -1882,7 +1973,7 @@ class CanvasMainWindow(QMainWindow):
                 settings.setValue("path", files[0])
 
         dialog.accepted.connect(save)
-        dialog.exec()
+        dialog.open()
 
     def __save_as_svg(self, path):
         doc = self.current_document()
@@ -1916,13 +2007,11 @@ class CanvasMainWindow(QMainWindow):
                 informative_text=ex.strerror
             )
 
-    def recent_scheme(self):
-        # type: () -> int
-        """
-        Browse recent schemes.
+    def recent_scheme(self, on_finished=None):
+        """Browse recent schemes.
 
-        Return QDialog.Rejected if the user canceled the operation and
-        QDialog.Accepted otherwise.
+        The *on_finished* callback, if provided, is called with
+        `QDialog.Accepted` or `QDialog.Rejected`.
         """
         settings = QSettings()
         recent_items = QSettings_readArray(
@@ -1946,28 +2035,25 @@ class CanvasMainWindow(QMainWindow):
                     '</h3>')
         dialog.setHeading(template.format(title))
         dialog.setModel(model)
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
 
         model.delayedScanUpdate()
 
-        status = dialog.exec()
+        def _on_finished(status):
+            if status == QDialog.Accepted:
+                index = dialog.currentIndex()
+                selected = model.item(index)
+                self.open_scheme_file(selected.path())
+            if on_finished is not None:
+                on_finished(status)
+        dialog.finished.connect(_on_finished)
+        dialog.open()
 
-        index = dialog.currentIndex()
+    def examples_dialog(self, on_finished=None):
+        """Browse a collection of tutorial/example schemes.
 
-        dialog.deleteLater()
-        model.deleteLater()
-
-        if status == QDialog.Accepted:
-            selected = model.item(index)
-            self.open_scheme_file(selected.path())
-        return status
-
-    def examples_dialog(self):
-        # type: () -> int
-        """
-        Browse a collection of tutorial/example schemes.
-
-        Returns QDialog.Rejected if the user canceled the dialog else loads
-        the selected scheme into the canvas and returns QDialog.Accepted.
+        The *on_finished* callback, if provided, is called with
+        `QDialog.Accepted` or `QDialog.Rejected`.
         """
         tutors = examples.workflows(config.default)
         items = [previewmodel.PreviewItem(path=t.abspath()) for t in tutors]
@@ -1981,20 +2067,21 @@ class CanvasMainWindow(QMainWindow):
 
         dialog.setHeading(template.format(title))
         dialog.setModel(model)
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
 
         model.delayedScanUpdate()
-        status = dialog.exec()
-        index = dialog.currentIndex()
 
-        dialog.deleteLater()
-
-        if status == QDialog.Accepted:
-            selected = model.item(index)
-            self.open_example_scheme(selected.path())
-        return status
+        def _on_finished(status):
+            if status == QDialog.Accepted:
+                index = dialog.currentIndex()
+                selected = model.item(index)
+                self.open_example_scheme(selected.path())
+            if on_finished is not None:
+                on_finished(status)
+        dialog.finished.connect(_on_finished)
+        dialog.open()
 
     def welcome_dialog(self):
-        # type: () -> int
         """Show a modal welcome dialog for Orange Canvas.
         """
         name = QApplication.applicationName()
@@ -2021,15 +2108,19 @@ class CanvasMainWindow(QMainWindow):
             dlg.setParent(dialog, Qt.Dialog)
             dlg.fileSelected.connect(self.open_scheme_file)
             dlg.accepted.connect(dialog.accept)
-            dlg.exec()
+            dlg.open()
 
         def open_recent():
-            if self.recent_scheme() == QDialog.Accepted:
-                dialog.accept()
+            self.recent_scheme(
+                on_finished=lambda s: dialog.accept()
+                if s == QDialog.Accepted else None
+            )
 
         def browse_examples():
-            if self.examples_dialog() == QDialog.Accepted:
-                dialog.accept()
+            self.examples_dialog(
+                on_finished=lambda s: dialog.accept()
+                if s == QDialog.Accepted else None
+            )
         new_action = QAction(
             self.tr("New"), dialog,
             toolTip=self.tr("Open a new workflow."),
@@ -2081,14 +2172,13 @@ class CanvasMainWindow(QMainWindow):
             settings.value("startup/show-welcome-screen", True, type=bool)
         )
 
-        status = dialog.exec()
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
 
-        settings.setValue("startup/show-welcome-screen",
-                          dialog.showAtStartup())
-
-        dialog.deleteLater()
-
-        return status
+        def _on_finished(_):
+            settings.setValue("startup/show-welcome-screen",
+                              dialog.showAtStartup())
+        dialog.finished.connect(_on_finished)
+        dialog.open()
 
     def scheme_properties_dialog(self):
         # type: () -> SchemeInfoDialog
@@ -2109,9 +2199,7 @@ class CanvasMainWindow(QMainWindow):
         return dialog
 
     def show_scheme_properties(self):
-        # type: () -> int
-        """
-        Show current scheme properties.
+        """Show current scheme properties.
         """
         current_doc = self.current_document()
         scheme = current_doc.scheme()
@@ -2119,16 +2207,16 @@ class CanvasMainWindow(QMainWindow):
         dlg = self.scheme_properties_dialog()
         dlg.setAutoCommit(False)
         dlg.setScheme(scheme)
-        status = dlg.exec()
 
-        if status == QDialog.Accepted:
+        def _on_accepted():
             editor = dlg.editor
             stack = current_doc.undoStack()
             stack.beginMacro(self.tr("Change Info"))
             current_doc.setTitle(editor.title())
             current_doc.setDescription(editor.description())
             stack.endMacro()
-        return status
+        dlg.accepted.connect(_on_accepted)
+        dlg.open()
 
     def set_signal_freeze(self, freeze):
         # type: (bool) -> None
@@ -2171,16 +2259,13 @@ class CanvasMainWindow(QMainWindow):
             doc.editNodeTitle(nodes[0])
 
     def open_canvas_settings(self):
-        # type: () -> None
         """Open canvas settings/preferences dialog
         """
         dlg = UserSettingsDialog(self)
         dlg.setWindowTitle(self.tr("Preferences"))
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        dlg.destroyed.connect(self.user_preferences_changed_notify_all)
         dlg.show()
-        status = dlg.exec()
-
-        if status == 0:
-            self.user_preferences_changed_notify_all()
 
     @staticmethod
     def user_preferences_changed_notify_all():
@@ -2200,19 +2285,22 @@ class CanvasMainWindow(QMainWindow):
         name = QApplication.applicationName() or "Orange"
         from orangecanvas.application.utils.addons import have_install_permissions
         if not have_install_permissions():
-            QMessageBox(QMessageBox.Warning,
-                        "Add-ons: insufficient permissions",
-                        "Insufficient permissions to install add-ons. Try starting {name} "
-                        "as a system administrator or install {name} in user folders."
-                        .format(name=name),
-                        parent=self).exec()
+            mb = QMessageBox(QMessageBox.Warning,
+                             "Add-ons: insufficient permissions",
+                             "Insufficient permissions to install add-ons. "
+                             "Try starting {name} as a system administrator "
+                             "or install {name} in user folders."
+                             .format(name=name),
+                             parent=self)
+            mb.setAttribute(Qt.WA_DeleteOnClose)
+            mb.open()
         dlg = addons.AddonManagerDialog(
             self, windowTitle=self.tr("Installer"), modal=True
         )
         dlg.setStyle(QApplication.style())
         dlg.setAttribute(Qt.WA_DeleteOnClose)
         dlg.start(config.default)
-        return dlg.exec()
+        dlg.open()
 
     def set_float_widgets_on_top_enabled(self, enabled):
         # type: (bool) -> None
@@ -2230,12 +2318,11 @@ class CanvasMainWindow(QMainWindow):
         return self.output_dock.widget()
 
     def open_about(self):
-        # type: () -> None
         """Open the about dialog.
         """
         dlg = AboutDialog(self)
         dlg.setAttribute(Qt.WA_DeleteOnClose)
-        dlg.exec()
+        dlg.open()
 
     def add_recent_scheme(self, title, path):
         # type: (str, str) -> None
@@ -2362,14 +2449,28 @@ class CanvasMainWindow(QMainWindow):
         """
         Close the main window.
         """
+        if self.__close_confirmed:
+            self.__close_confirmed = False
+            self._do_close(event)
+            return
+
         document = self.current_document()
         if document.isModifiedStrict():
-            if self.ask_save_changes() == QDialog.Rejected:
-                # Reject the event
-                event.ignore()
-                return
+            event.ignore()
 
+            def _on_save_result(result):
+                if result == QDialog.Accepted:
+                    self.__close_confirmed = True
+                    self.close()
+            self.ask_save_changes(on_finished=_on_save_result)
+            return
+
+        self._do_close(event)
+
+    def _do_close(self, event):
+        """Perform the actual close cleanup."""
         self.clear_swp()
+        document = self.current_document()
 
         old_scheme = document.scheme()
 

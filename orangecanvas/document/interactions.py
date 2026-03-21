@@ -27,7 +27,7 @@ from AnyQt.QtWidgets import (
 from AnyQt.QtGui import QPen, QBrush, QColor, QFontMetrics, QKeyEvent, QFont
 from AnyQt.QtCore import (
     Qt, QObject, QCoreApplication, QSizeF, QPointF, QRect, QRectF, QLineF,
-    QPoint, QMimeData,
+    QPoint, QMimeData, QTimer, QEvent,
 )
 from AnyQt.QtCore import pyqtSignal as Signal
 
@@ -341,6 +341,10 @@ class NewLinkAction(UserInteraction):
         # Cache viable signals of currently hovered node
         self.__target_compatible_signals: Sequence[Tuple[OutputSignal, InputSignal]] = []
 
+        # Track whether an async edit-links dialog is pending
+        self.__connect_nodes_pending_dialog = False
+        self.__pending_stack = None
+
         self.cancelOnEsc = True
 
     def remove_tmp_anchor(self):
@@ -594,7 +598,6 @@ class NewLinkAction(UserInteraction):
         # type: (QGraphicsSceneMouseEvent) -> bool
         if self.tmp_link_item is not None:
             item = self.target_node_item_at(event.scenePos())
-            node = None  # type: Optional[Node]
             stack = self.document.undoStack()
 
             self.macro = UndoCommand(self.tr("Add link"))
@@ -602,62 +605,88 @@ class NewLinkAction(UserInteraction):
             if item:
                 # If the release was over a node item then connect them
                 node = self.scene.node_for_item(item)
+                self._finish_mouse_release(node, item, event, stack)
             else:
                 # Release on an empty canvas part
                 # Show a quick menu popup for a new widget creation.
+                # create_new opens the menu non-blocking; the continuation
+                # happens in the callback.
                 try:
-                    node = self.create_new(event)
+                    self.create_new(
+                        event,
+                        on_done=lambda node: self._finish_mouse_release(
+                            node, None, event, stack
+                        )
+                    )
                 except Exception:
                     log.error("Failed to create a new node, ending.",
                               exc_info=True)
-                    node = None
+                    self.end()
 
-                if node is not None:
-                    commands.AddNodeCommand(self.scheme, node,
-                                            parent=self.macro)
-
-            if node is not None and not self.showing_incompatible_widget:
-                if self.direction == self.FROM_SOURCE:
-                    source_node = self.scene.node_for_item(self.from_item)
-                    source_signal = self.from_signal
-                    sink_node = node
-                    if item is not None and item.inputAnchorItem.anchorOpen():
-                        sink_signal = item.inputAnchorItem.signalAtPos(
-                            event.scenePos(),
-                            self.__target_compatible_signals
-                        )
-                    else:
-                        sink_signal = None
-                else:
-                    source_node = node
-                    if item is not None and item.outputAnchorItem.anchorOpen():
-                        source_signal = item.outputAnchorItem.signalAtPos(
-                            event.scenePos(),
-                            self.__target_compatible_signals
-                        )
-                    else:
-                        source_signal = None
-                    sink_node = self.scene.node_for_item(self.from_item)
-                    sink_signal = self.from_signal
-                self.suggestions.set_direction(self.direction)
-                self.connect_nodes(source_node, sink_node,
-                                   source_signal, sink_signal)
-                self.reset_open_anchor()
-                if not self.isCanceled() or not self.isFinished() and \
-                        self.macro is not None:
-                    # Push (commit) the add link/node action on the stack.
-                    stack.push(self.macro)
-
-            self.end()
             return True
         else:
             self.end()
             return False
 
-    def create_new(self, event):
-        # type: (QGraphicsSceneMouseEvent) -> Optional[Node]
+    def _finish_mouse_release(self, node, item, event, stack):
+        # type: (Optional[Node], Optional[items.NodeItem], QGraphicsSceneMouseEvent, Any) -> None
         """
-        Create and return a new node with a `QuickMenu`.
+        Continuation of mouseReleaseEvent after the node has been resolved
+        (either directly from target item or from the QuickMenu callback).
+        """
+        if node is not None and item is None:
+            # Node created from the QuickMenu
+            commands.AddNodeCommand(self.scheme, node,
+                                    parent=self.macro)
+
+        if node is not None and not self.showing_incompatible_widget:
+            if self.direction == self.FROM_SOURCE:
+                source_node = self.scene.node_for_item(self.from_item)
+                source_signal = self.from_signal
+                sink_node = node
+                if item is not None and item.inputAnchorItem.anchorOpen():
+                    sink_signal = item.inputAnchorItem.signalAtPos(
+                        event.scenePos(),
+                        self.__target_compatible_signals
+                    )
+                else:
+                    sink_signal = None
+            else:
+                source_node = node
+                if item is not None and item.outputAnchorItem.anchorOpen():
+                    source_signal = item.outputAnchorItem.signalAtPos(
+                        event.scenePos(),
+                        self.__target_compatible_signals
+                    )
+                else:
+                    source_signal = None
+                sink_node = self.scene.node_for_item(self.from_item)
+                sink_signal = self.from_signal
+            self.suggestions.set_direction(self.direction)
+            # Store stack ref for deferred use in dialog callback
+            self.__pending_stack = stack
+            self.connect_nodes(source_node, sink_node,
+                               source_signal, sink_signal)
+            if self.__connect_nodes_pending_dialog:
+                # The edit links dialog is open; _on_edit_links_finished
+                # will handle reset_open_anchor, stack push, and self.end().
+                return
+            self.reset_open_anchor()
+            if not self.isCanceled() or not self.isFinished() and \
+                    self.macro is not None:
+                # Push (commit) the add link/node action on the stack.
+                stack.push(self.macro)
+
+        self.end()
+
+    def create_new(self, event, on_done=None):
+        # type: (QGraphicsSceneMouseEvent, Optional[Any]) -> None
+        """
+        Create a new node with a `QuickMenu` (non-blocking).
+
+        The menu is opened as a popup. When the user selects an action
+        (or dismisses the menu), `on_done` is called with the created
+        node (or None).
         """
         pos = event.screenPos()
         menu = self.document.quickMenu()
@@ -700,27 +729,52 @@ class NewLinkAction(UserInteraction):
 
         menu.setFilterFunc(filter)
         menu.triggerSearch()
-        try:
-            action = menu.exec(pos)
-        finally:
+
+        triggered_action = []  # mutable container to capture triggered action
+
+        def on_triggered(action):
+            triggered_action.append(action)
+
+        # Use an event filter to detect when the menu is hidden (since
+        # QuickMenu, a QWidget popup, does not have an aboutToHide signal).
+        class _HideWatcher(QObject):
+            def eventFilter(self_, obj, evt):
+                if obj is menu and evt.type() == QEvent.Hide:
+                    # Defer cleanup so that triggered fires first
+                    # (triggered is emitted after hide() in __onTriggered).
+                    QTimer.singleShot(0, _cleanup)
+                return False
+
+        def _cleanup():
+            menu.triggered.disconnect(on_triggered)
+            menu.removeEventFilter(hide_watcher)
+            hide_watcher.deleteLater()
             menu.setFilterFunc(None)
 
-        if action:
-            item = action.property("item")
-            desc = item.data(QtWidgetRegistry.WIDGET_DESC_ROLE)
-            pos = event.scenePos()
-            # a new widget should be placed so that the connection
-            # stays as it was
-            offset = 31 * (-1 if self.direction == self.FROM_SINK else
-                           1 if self.direction == self.FROM_SOURCE else 0)
-            statistics = self.document.usageStatistics()
-            statistics.begin_extend_action(from_sink, node)
-            node = self.document.newNodeHelper(desc,
-                                               position=(pos.x() + offset,
-                                                         pos.y()))
-            return node
-        else:
-            return None
+            result_node = None
+            if triggered_action:
+                action = triggered_action[0]
+                item = action.property("item")
+                desc = item.data(QtWidgetRegistry.WIDGET_DESC_ROLE)
+                scene_pos = event.scenePos()
+                # a new widget should be placed so that the connection
+                # stays as it was
+                offset = 31 * (-1 if self.direction == self.FROM_SINK else
+                               1 if self.direction == self.FROM_SOURCE else 0)
+                statistics = self.document.usageStatistics()
+                statistics.begin_extend_action(from_sink, node)
+                result_node = self.document.newNodeHelper(
+                    desc,
+                    position=(scene_pos.x() + offset, scene_pos.y())
+                )
+
+            if on_done is not None:
+                on_done(result_node)
+
+        hide_watcher = _HideWatcher(menu)
+        menu.installEventFilter(hide_watcher)
+        menu.triggered.connect(on_triggered)
+        menu.popup(pos)
 
     def connect_nodes(
             self, source_node: Node, sink_node: Node,
@@ -732,7 +786,12 @@ class NewLinkAction(UserInteraction):
         equally weighted and non conflicting links possible present a
         detailed dialog for link editing.
 
+        Note: When a link-edit dialog is needed, this method opens it
+        non-blocking. The caller must NOT call self.end() after this
+        method returns in that case; the dialog callback handles it
+        via `self.__connect_nodes_pending_dialog`.
         """
+        self.__connect_nodes_pending_dialog = False
         UsageStatistics.set_sink_anchor_open(sink_signal is not None)
         UsageStatistics.set_source_anchor_open(source_signal is not None)
         try:
@@ -749,8 +808,6 @@ class NewLinkAction(UserInteraction):
 
             # just a list of signal tuples for now, will be converted
             # to SchemeLinks later
-            links_to_add = []     # type: List[Link]
-            links_to_remove = []  # type: List[Link]
             show_link_dialog = False
 
             # Ambiguous new link request.
@@ -778,42 +835,27 @@ class NewLinkAction(UserInteraction):
                 else:
                     initial_links = [(source, sink)]
 
+                # Mark that the dialog is pending so the caller knows
+                # not to call self.end() immediately.
+                self.__connect_nodes_pending_dialog = True
                 try:
-                    rstatus, links_to_add, links_to_remove = self.edit_links(
-                        source_node, sink_node, initial_links
+                    self.edit_links(
+                        source_node, sink_node, initial_links,
+                        on_finished=self._on_edit_links_finished,
                     )
                 except Exception:
+                    self.__connect_nodes_pending_dialog = False
                     log.error("Failed to edit the links",
                               exc_info=True)
                     raise
-                if rstatus == EditLinksDialog.Rejected:
-                    raise UserCanceledError
             else:
                 # links_to_add now needs to be a list of actual SchemeLinks
                 links_to_add = [
                     scheme.SchemeLink(source_node, source, sink_node, sink)
-                ]
+                ]  # type: List[Link]
                 links_to_add, links_to_remove = \
                     add_links_plan(self.scheme, links_to_add)
-
-            # Remove temp items before creating any new links
-            self.cleanup()
-
-            for link in links_to_remove:
-                commands.RemoveLinkCommand(self.scheme, link,
-                                           parent=self.macro)
-
-            for link in links_to_add:
-                # Check if the new requested link is a duplicate of an
-                # existing link
-                duplicate = self.scheme.find_links(
-                    link.source_node, link.source_channel,
-                    link.sink_node, link.sink_channel
-                )
-
-                if not duplicate:
-                    commands.AddLinkCommand(self.scheme, link,
-                                            parent=self.macro)
+                self._apply_link_changes(links_to_add, links_to_remove)
 
         except scheme.IncompatibleChannelTypeError:
             log.info("Cannot connect: invalid channel types.")
@@ -832,52 +874,113 @@ class NewLinkAction(UserInteraction):
                       exc_info=True)
             self.cancel()
 
+    def _on_edit_links_finished(self, rstatus, links_to_add, links_to_remove):
+        # type: (int, List[Link], List[Link]) -> None
+        """
+        Callback invoked when the EditLinksDialog opened by connect_nodes
+        is finished. Also handles the deferred stack push and self.end()
+        from _finish_mouse_release.
+        """
+        self.__connect_nodes_pending_dialog = False
+        try:
+            if rstatus == EditLinksDialog.Rejected:
+                raise UserCanceledError
+            self._apply_link_changes(links_to_add, links_to_remove)
+            self.reset_open_anchor()
+            stack = self.__pending_stack
+            if not self.isCanceled() or not self.isFinished() and \
+                    self.macro is not None:
+                stack.push(self.macro)
+        except UserCanceledError:
+            log.info("User canceled a new link action.")
+            self.cancel(UserInteraction.UserCancelReason)
+        except Exception:
+            log.error("An error occurred during the creation of a new link.",
+                      exc_info=True)
+            self.cancel()
+        finally:
+            if not self.isFinished():
+                self.end()
+
+    def _apply_link_changes(self, links_to_add, links_to_remove):
+        # type: (List[Link], List[Link]) -> None
+        """
+        Apply link additions and removals using undo commands.
+        """
+        # Remove temp items before creating any new links
+        self.cleanup()
+
+        for link in links_to_remove:
+            commands.RemoveLinkCommand(self.scheme, link,
+                                       parent=self.macro)
+
+        for link in links_to_add:
+            # Check if the new requested link is a duplicate of an
+            # existing link
+            duplicate = self.scheme.find_links(
+                link.source_node, link.source_channel,
+                link.sink_node, link.sink_channel
+            )
+
+            if not duplicate:
+                commands.AddLinkCommand(self.scheme, link,
+                                        parent=self.macro)
+
     def edit_links(
             self,
             source_node: Node,
             sink_node: Node,
-            initial_links: 'Optional[List[OIPair]]' = None
-    ) -> 'Tuple[int, List[Link], List[Link]]':
+            initial_links: 'Optional[List[OIPair]]' = None,
+            on_finished: 'Optional[Any]' = None
+    ) -> None:
         """
-        Show and execute the `EditLinksDialog`.
+        Show the `EditLinksDialog` (non-blocking).
+
         Optional `initial_links` list can provide a list of initial
         `(source, sink)` channel tuples to show in the view, otherwise
         the dialog is populated with existing links in the scheme (passing
         an empty list will disable all initial links).
 
+        `on_finished` is called with ``(status, links_to_add, links_to_remove)``
+        when the dialog closes.
         """
-        status, links_to_add_spec, links_to_remove_spec = \
-            edit_links(
-                self.scheme, source_node, sink_node, initial_links,
-                parent=self.document
-            )
-
-        if status == EditLinksDialog.Accepted:
-            links_to_add = [
-                scheme.SchemeLink(
-                    source_node, source_channel,
-                    sink_node, sink_channel
-                ) for source_channel, sink_channel in links_to_add_spec
-            ]
-            links_to_remove = list(reduce(
-                list.__iadd__, (
-                    self.scheme.find_links(
+        def _on_result(status, links_to_add_spec, links_to_remove_spec):
+            if status == EditLinksDialog.Accepted:
+                links_to_add = [
+                    scheme.SchemeLink(
                         source_node, source_channel,
                         sink_node, sink_channel
-                    ) for source_channel, sink_channel in links_to_remove_spec
-                ),
-                []
-            ))  # type: List[Link]
-            conflicting = [conflicting_single_link(self.scheme, link)
-                           for link in links_to_add]
-            conflicting = [link for link in conflicting if link is not None]
-            for link in conflicting:
-                if link not in links_to_remove:
-                    links_to_remove.append(link)
+                    ) for source_channel, sink_channel in links_to_add_spec
+                ]
+                links_to_remove = list(reduce(
+                    list.__iadd__, (
+                        self.scheme.find_links(
+                            source_node, source_channel,
+                            sink_node, sink_channel
+                        ) for source_channel, sink_channel
+                        in links_to_remove_spec
+                    ),
+                    []
+                ))  # type: List[Link]
+                conflicting = [conflicting_single_link(self.scheme, link)
+                               for link in links_to_add]
+                conflicting = [link for link in conflicting
+                               if link is not None]
+                for link in conflicting:
+                    if link not in links_to_remove:
+                        links_to_remove.append(link)
 
-            return status, links_to_add, links_to_remove
-        else:
-            return status, [], []
+                if on_finished is not None:
+                    on_finished(status, links_to_add, links_to_remove)
+            else:
+                if on_finished is not None:
+                    on_finished(status, [], [])
+
+        edit_links(
+            self.scheme, source_node, sink_node, initial_links,
+            parent=self.document,
+            on_finished=_on_result,
+        )
 
     def end(self):
         # type: () -> None
@@ -941,15 +1044,19 @@ def edit_links(
         source_node: Node,
         sink_node: Node,
         initial_links: 'Optional[List[OIPair]]' = None,
-        parent: 'Optional[QWidget]' = None
-) -> 'Tuple[int, List[OIPair], List[OIPair]]':
+        parent: 'Optional[QWidget]' = None,
+        on_finished: 'Optional[Any]' = None
+) -> None:
     """
-    Show and execute the `EditLinksDialog`.
+    Show the `EditLinksDialog` (non-blocking).
+
     Optional `initial_links` list can provide a list of initial
     `(source, sink)` channel tuples to show in the view, otherwise
     the dialog is populated with existing links in the scheme (passing
     an empty list will disable all initial links).
 
+    When the dialog is closed, `on_finished` is called with
+    ``(result, links_to_add, links_to_remove)``.
     """
     log.info("Constructing a Link Editor dialog.")
 
@@ -966,18 +1073,21 @@ def edit_links(
     dlg.setNodes(source_node, sink_node)
     dlg.setLinks(initial_links)
 
-    log.info("Executing a Link Editor Dialog.")
-    rval = dlg.exec()
+    log.info("Opening a Link Editor Dialog.")
 
-    if rval == EditLinksDialog.Accepted:
-        edited_links = dlg.links()
+    def _on_finished(result):
+        if result == EditLinksDialog.Accepted:
+            edited_links = dlg.links()
+            links_to_add = set(edited_links) - set(existing_links)
+            links_to_remove = set(existing_links) - set(edited_links)
+            if on_finished is not None:
+                on_finished(result, list(links_to_add), list(links_to_remove))
+        else:
+            if on_finished is not None:
+                on_finished(result, [], [])
 
-        # Differences
-        links_to_add = set(edited_links) - set(existing_links)
-        links_to_remove = set(existing_links) - set(edited_links)
-        return rval, list(links_to_add), list(links_to_remove)
-    else:
-        return rval, [], []
+    dlg.finished.connect(_on_finished)
+    dlg.open()
 
 
 def add_links_plan(scheme, links, force_replace=False):
@@ -1045,14 +1155,15 @@ class NewNodeAction(UserInteraction):
         # type: (QGraphicsSceneMouseEvent) -> bool
         if event.button() == Qt.RightButton:
             self.create_new(event.screenPos())
-            self.end()
+            # self.end() is deferred to the menu callback
         return True
 
     def create_new(self, pos, search_text=""):
-        # type: (QPoint, str) -> Optional[Node]
+        # type: (QPoint, str) -> None
         """
         Create and add new node to the workflow using `QuickMenu` popup at
-        `pos` (in screen coordinates).
+        `pos` (in screen coordinates). Non-blocking: opens the menu and
+        the node is created in the triggered callback.
         """
         menu = self.document.quickMenu()
         menu.setFilterFunc(None)
@@ -1066,22 +1177,45 @@ class NewNodeAction(UserInteraction):
 
         menu.setSortingFunc(defaultSort)
 
-        action = menu.exec(pos, search_text)
-        if action:
-            item = action.property("item")
-            desc = item.data(QtWidgetRegistry.WIDGET_DESC_ROLE)
-            # Get the scene position
-            view = self.document.view()
-            pos = view.mapToScene(view.mapFromGlobal(pos))
+        triggered_action = []  # mutable container to capture triggered action
 
-            statistics = self.document.usageStatistics()
-            statistics.begin_action(UsageStatistics.QuickMenu)
-            node = self.document.newNodeHelper(desc,
-                                               position=(pos.x(), pos.y()))
-            self.document.addNode(node)
-            return node
-        else:
-            return None
+        def on_triggered(action):
+            triggered_action.append(action)
+
+        # Use an event filter to detect when the menu is hidden (since
+        # QuickMenu, a QWidget popup, does not have an aboutToHide signal).
+        class _HideWatcher(QObject):
+            def eventFilter(self_, obj, evt):
+                if obj is menu and evt.type() == QEvent.Hide:
+                    QTimer.singleShot(0, _cleanup)
+                return False
+
+        def _cleanup():
+            menu.triggered.disconnect(on_triggered)
+            menu.removeEventFilter(hide_watcher)
+            hide_watcher.deleteLater()
+
+            if triggered_action:
+                action = triggered_action[0]
+                item = action.property("item")
+                desc = item.data(QtWidgetRegistry.WIDGET_DESC_ROLE)
+                # Get the scene position
+                view = self.document.view()
+                scene_pos = view.mapToScene(view.mapFromGlobal(pos))
+
+                statistics = self.document.usageStatistics()
+                statistics.begin_action(UsageStatistics.QuickMenu)
+                node = self.document.newNodeHelper(
+                    desc, position=(scene_pos.x(), scene_pos.y())
+                )
+                self.document.addNode(node)
+
+            self.end()
+
+        hide_watcher = _HideWatcher(menu)
+        menu.installEventFilter(hide_watcher)
+        menu.triggered.connect(on_triggered)
+        menu.popup(pos, search_text)
 
 
 class RectangleSelectionAction(UserInteraction):
@@ -1257,12 +1391,12 @@ class EditNodeLinksAction(UserInteraction):
     def edit_links(self, initial_links=None):
         # type: (Optional[List[OIPair]]) -> None
         """
-        Show and execute the `EditLinksDialog`.
+        Show the `EditLinksDialog` (non-blocking).
+
         Optional `initial_links` list can provide a list of initial
         `(source, sink)` channel tuples to show in the view, otherwise
         the dialog is populated with existing links in the scheme (passing
         an empty list will disable all initial links).
-
         """
         log.info("Constructing a Link Editor dialog.")
 
@@ -1279,50 +1413,55 @@ class EditNodeLinksAction(UserInteraction):
         dlg.setNodes(self.source_node, self.sink_node)
         dlg.setLinks(initial_links)
 
-        log.info("Executing a Link Editor Dialog.")
-        rval = dlg.exec()
+        log.info("Opening a Link Editor Dialog.")
 
-        if rval == EditLinksDialog.Accepted:
-            links_spec = dlg.links()
+        def _on_finished(result):
+            if result == EditLinksDialog.Accepted:
+                links_spec = dlg.links()
 
-            links_to_add = set(links_spec) - set(existing_links)
-            links_to_remove = set(existing_links) - set(links_spec)
+                links_to_add = set(links_spec) - set(existing_links)
+                links_to_remove = set(existing_links) - set(links_spec)
 
-            stack = self.document.undoStack()
-            stack.beginMacro("Edit Links")
+                stack = self.document.undoStack()
+                stack.beginMacro("Edit Links")
 
-            # First remove links into a 'Single' sink channel,
-            # but only the ones that do not have self.source_node as
-            # a source (they will be removed later from links_to_remove)
-            for _, sink_channel in links_to_add:
-                if sink_channel.single:
-                    existing = self.scheme.find_links(
+                # First remove links into a 'Single' sink channel,
+                # but only the ones that do not have self.source_node as
+                # a source (they will be removed later from links_to_remove)
+                for _, sink_channel in links_to_add:
+                    if sink_channel.single:
+                        existing = self.scheme.find_links(
+                            sink_node=self.sink_node,
+                            sink_channel=sink_channel
+                        )
+
+                        existing = [link for link in existing
+                                    if link.source_node is not self.source_node]
+
+                        if existing:
+                            assert len(existing) == 1
+                            self.document.removeLink(existing[0])
+
+                for source_channel, sink_channel in links_to_remove:
+                    found_links = self.scheme.find_links(
+                        source_node=self.source_node,
+                        source_channel=source_channel,
                         sink_node=self.sink_node,
                         sink_channel=sink_channel
                     )
+                    assert len(found_links) == 1
+                    self.document.removeLink(found_links[0])
 
-                    existing = [link for link in existing
-                                if link.source_node is not self.source_node]
+                for source_channel, sink_channel in links_to_add:
+                    link = scheme.SchemeLink(self.source_node, source_channel,
+                                             self.sink_node, sink_channel)
 
-                    if existing:
-                        assert len(existing) == 1
-                        self.document.removeLink(existing[0])
+                    self.document.addLink(link)
 
-            for source_channel, sink_channel in links_to_remove:
-                links = self.scheme.find_links(source_node=self.source_node,
-                                               source_channel=source_channel,
-                                               sink_node=self.sink_node,
-                                               sink_channel=sink_channel)
-                assert len(links) == 1
-                self.document.removeLink(links[0])
+                stack.endMacro()
 
-            for source_channel, sink_channel in links_to_add:
-                link = scheme.SchemeLink(self.source_node, source_channel,
-                                         self.sink_node, sink_channel)
-
-                self.document.addLink(link)
-
-            stack.endMacro()
+        dlg.finished.connect(_on_finished)
+        dlg.open()
 
 
 def point_to_tuple(point):
@@ -2085,11 +2224,14 @@ class PluginDropHandler(DropHandler):
 
         Dispatch the drop to the plugin handler that accepted the event.
         In case there are multiple handlers that accepted the event, a menu
-        is used to select the handler.
+        is used to select the handler (non-blocking popup).
         """
         handler: Optional[DropHandler] = None
         if len(self.__accepts) == 1:
             ep, handler = self.__accepts[0]
+            if handler is None:
+                return False
+            return handler.doDrop(document, event)
         elif len(self.__accepts) > 1:
             class Title(QWidgetAction):
                 def createWidget(self, parent):
@@ -2110,12 +2252,22 @@ class PluginDropHandler(DropHandler):
                 if not ac.toolTip():
                     ac.setToolTip(f"{ep_.name} ({ep_.module_name})")
                 ac.setData(handler_)
-            action = menu.exec(event.screenPos())
-            if action is not None:
-                handler = action.data()
-        if handler is None:
-            return False
-        return handler.doDrop(document, event)
+
+            def _on_triggered(action):
+                selected_handler = action.data()
+                if selected_handler is not None:
+                    try:
+                        selected_handler.doDrop(document, event)
+                    except Exception:  # noqa
+                        log.exception("")
+
+            menu.triggered.connect(_on_triggered)
+            menu.setAttribute(Qt.WA_DeleteOnClose)
+            menu.popup(event.screenPos())
+            # Return True optimistically: at least one handler accepted
+            # the event. The actual drop is dispatched in _on_triggered.
+            return True
+        return False
 
 
 def action_for_handler(handler: DropHandler, document, event) -> Optional[QAction]:

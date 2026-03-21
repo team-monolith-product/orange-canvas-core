@@ -2113,24 +2113,22 @@ class SchemeEditWidget(QWidget):
         menu.setSortingFunc(None)
 
         view = self.view()
-        try:
-            action = menu.exec(view.mapToGlobal(view.mapFromScene(QPointF(x, y))))
-        finally:
-            menu.setFilterFunc(None)
+        pos = view.mapToGlobal(view.mapFromScene(QPointF(x, y)))
 
-        if action:
+        def _on_triggered(action):
             item = action.property("item")
             desc = item.data(QtWidgetRegistry.WIDGET_DESC_ROLE)
-        else:
-            return
+            if can_insert_node(desc, original_link):
+                statistics = self.usageStatistics()
+                statistics.begin_insert_action(False, original_link)
+                new_node = self.newNodeHelper(desc, position=(x, y))
+                self.insertNode(new_node, original_link)
+            else:
+                log.info("Cannot insert node: links not possible.")
 
-        if can_insert_node(desc, original_link):
-            statistics = self.usageStatistics()
-            statistics.begin_insert_action(False, original_link)
-            new_node = self.newNodeHelper(desc, position=(x, y))
-            self.insertNode(new_node, original_link)
-        else:
-            log.info("Cannot insert node: links not possible.")
+        menu.triggered.connect(_on_triggered)
+        menu.aboutToHide.connect(lambda: menu.setFilterFunc(None))
+        menu.popup(pos)
 
     def __duplicateSelected(self):
         # type: () -> None
