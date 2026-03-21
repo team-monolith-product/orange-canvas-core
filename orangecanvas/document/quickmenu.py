@@ -28,7 +28,7 @@ from AnyQt.QtGui import (
     QPaintEvent, QColor, QPainter, QMouseEvent
 )
 from AnyQt.QtCore import (
-    Qt, QObject, QPoint, QPointF, QSize, QRect, QRectF, QEventLoop, QEvent,
+    Qt, QObject, QPoint, QPointF, QSize, QRect, QRectF, QEvent,
     QModelIndex, QTimer, QRegularExpression, QSortFilterProxyModel,
     QItemSelectionModel, QAbstractItemModel, QSettings
 )
@@ -1338,7 +1338,6 @@ class QuickMenu(FramelessWindow):
         self.__grip = WindowSizeGrip(self)  # type: Optional[WindowSizeGrip]
         self.__grip.raise_()
 
-        self.__loop = None   # type: Optional[QEventLoop]
         self.__model = None  # type: Optional[QAbstractItemModel]
         self.setModel(QStandardItemModel())
         self.__triggeredAction = None  # type: Optional[QAction]
@@ -1613,33 +1612,6 @@ class QuickMenu(FramelessWindow):
 
         self.setFocusProxy(self.__search)
 
-    def exec(self, pos=None, searchText=""):
-        # type: (Optional[QPoint], str) -> Optional[QAction]
-        """
-        Execute the menu at position `pos` (in global screen coordinates).
-        Return the triggered :class:`QAction` or `None` if no action was
-        triggered. 'Search' text field is initialized with `searchText` if
-        provided.
-        """
-        self.popup(pos, searchText)
-        self.setFocus(Qt.PopupFocusReason)
-
-        self.__triggeredAction = None
-        self.__loop = QEventLoop()
-        self.__loop.exec()
-        self.__loop.deleteLater()
-        self.__loop = None
-
-        action = self.__triggeredAction
-        self.__triggeredAction = None
-        return action
-
-    def exec_(self, *args, **kwargs):
-        warnings.warn(
-            "exec_ is deprecated, use exec", DeprecationWarning, stacklevel=2
-        )
-        return self.exec(*args, **kwargs)
-
     def hideEvent(self, event):
         """
         Reimplemented from :class:`QWidget`
@@ -1647,8 +1619,6 @@ class QuickMenu(FramelessWindow):
         settings = QSettings()
         settings.setValue('quickmenu/size', self.size())
         super().hideEvent(event)
-        if self.__loop:
-            self.__loop.exit()
 
     def setCurrentPage(self, page):
         # type: (MenuPage) -> None

@@ -742,7 +742,8 @@ class AddonManagerDialog(QDialog):
             dlg.accept()
         buttons.accepted.connect(query)
         buttons.rejected.connect(dlg.reject)
-        dlg.exec()
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        dlg.open()
 
     @Slot(str, str)
     def __show_error_for_query(self, text, error_details):
@@ -879,9 +880,21 @@ class AddonManagerDialog(QDialog):
             msg_box = QMessageBox(icon, title, text, buttons, self)
             msg_box.setInformativeText("Do you want to continue?")
             msg_box.setDefaultButton(QMessageBox.Ok)
-            if msg_box.exec() != QMessageBox.Ok:
-                steps = []
+            msg_box.setAttribute(Qt.WA_DeleteOnClose)
 
+            def _on_core_upgrade_decision(_):
+                btn = msg_box.standardButton(msg_box.clickedButton())
+                if btn == QMessageBox.Ok:
+                    self._proceed_with_steps(steps)
+                else:
+                    self.accept()
+            msg_box.finished.connect(_on_core_upgrade_decision)
+            msg_box.open()
+            return
+
+        self._proceed_with_steps(steps)
+
+    def _proceed_with_steps(self, steps):
         if steps:
             # Move all uninstall steps to the front
             steps = sorted(
@@ -933,42 +946,49 @@ class AddonManagerDialog(QDialog):
         self.__on_installer_finished_common()
         name = QApplication.applicationName() or 'Orange'
 
-        def message_restart(parent):
-            icon = QMessageBox.Information
-            buttons = QMessageBox.Ok | QMessageBox.Cancel
-            title = 'Information'
-            text = ('{} needs to be restarted for the changes to take effect.'
-                    .format(name))
-            msg_box = QMessageBox(icon, title, text, buttons, parent)
-            msg_box.setDefaultButton(QMessageBox.Ok)
-            msg_box.setInformativeText('Press OK to restart {} now.'
-                                       .format(name))
-            msg_box.button(QMessageBox.Cancel).setText('Close later')
-            return msg_box.exec()
+        icon = QMessageBox.Information
+        buttons = QMessageBox.Ok | QMessageBox.Cancel
+        title = 'Information'
+        text = ('{} needs to be restarted for the changes to take effect.'
+                .format(name))
+        msg_box = QMessageBox(icon, title, text, buttons, self)
+        msg_box.setDefaultButton(QMessageBox.Ok)
+        msg_box.setInformativeText('Press OK to restart {} now.'
+                                   .format(name))
+        msg_box.button(QMessageBox.Cancel).setText('Close later')
+        msg_box.setAttribute(Qt.WA_DeleteOnClose)
 
-        if QMessageBox.Ok == message_restart(self):
-            self.accept()
+        def _on_restart_decision(_):
+            btn = msg_box.standardButton(msg_box.clickedButton())
+            if btn == QMessageBox.Ok:
+                self.accept()
 
-            def restart():
-                quit_temp_val = QApplication.quitOnLastWindowClosed()
-                QApplication.setQuitOnLastWindowClosed(False)
-                QApplication.closeAllWindows()
-                windows = QApplication.topLevelWindows()
-                if any(w.isVisible() for w in windows):  # if a window close was cancelled
-                    QApplication.setQuitOnLastWindowClosed(quit_temp_val)
-                    QMessageBox(
-                        text="Restart Cancelled",
-                        informativeText="Changes will be applied on {}'s next restart"
-                                        .format(name),
-                        icon=QMessageBox.Information
-                    ).exec()
-                else:
-                    # Sometimes it doesn't actually exit unless this call is queued
-                    QTimer.singleShot(0, lambda: QApplication.exit(96))
+                def restart():
+                    quit_temp_val = QApplication.quitOnLastWindowClosed()
+                    QApplication.setQuitOnLastWindowClosed(False)
+                    QApplication.closeAllWindows()
+                    windows = QApplication.topLevelWindows()
+                    if any(w.isVisible() for w in windows):
+                        QApplication.setQuitOnLastWindowClosed(quit_temp_val)
+                        mb = QMessageBox(
+                            text="Restart Cancelled",
+                            informativeText=(
+                                "Changes will be applied on {}'s next restart"
+                                .format(name)),
+                            icon=QMessageBox.Information
+                        )
+                        mb.setAttribute(Qt.WA_DeleteOnClose)
+                        mb.open()
+                    else:
+                        QTimer.singleShot(
+                            0, lambda: QApplication.exit(96)
+                        )
 
-            QTimer.singleShot(0, restart)
-        else:
-            self.reject()
+                QTimer.singleShot(0, restart)
+            else:
+                self.reject()
+        msg_box.finished.connect(_on_restart_decision)
+        msg_box.open()
 
 
 def main(argv=None):  # noqa

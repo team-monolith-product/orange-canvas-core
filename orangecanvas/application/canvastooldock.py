@@ -15,8 +15,7 @@ from AnyQt.QtGui import (
 )
 from AnyQt.QtCore import (
     Qt, QSize, QObject, QPropertyAnimation, QEvent, QRect, QPoint,
-    QAbstractItemModel, QModelIndex, QPersistentModelIndex, QEventLoop,
-    QMimeData
+    QAbstractItemModel, QModelIndex, QPersistentModelIndex, QMimeData
 )
 from AnyQt.QtCore import pyqtProperty as Property, pyqtSignal as Signal
 
@@ -463,7 +462,6 @@ class CategoryPopupMenu(FramelessWindow):
         self.setLayout(layout)
 
         self.__action = None  # type: Optional[QAction]
-        self.__loop = None    # type: Optional[QEventLoop]
 
     def setCategoryItem(self, item):
         """
@@ -530,31 +528,8 @@ class CategoryPopupMenu(FramelessWindow):
         self.show()
         self.__menu.view().setFocus()
 
-    def exec(self, pos=None):
-        # type: (Optional[QPoint]) -> Optional[QAction]
-        self.popup(pos)
-        self.__loop = QEventLoop()
-
-        self.__action = None
-        self.__loop.exec()
-        self.__loop = None
-
-        if self.__action is not None:
-            action = self.__action
-        else:
-            action = None
-        return action
-
-    def exec_(self, *args, **kwargs):
-        warnings.warn(
-            "exec_ is deprecated, use exec", DeprecationWarning, stacklevel=2
-        )
-        return self.exec(*args, **kwargs)
-
     def hideEvent(self, event):
         # type: (QHideEvent) -> None
-        if self.__loop is not None:
-            self.__loop.exit(0)
         super().hideEvent(event)
 
     def __onTriggered(self, action):
@@ -562,9 +537,6 @@ class CategoryPopupMenu(FramelessWindow):
         self.__action = action
         self.triggered.emit(action)
         self.hide()
-
-        if self.__loop:
-            self.__loop.exit(0)
 
     def __onDragStarted(self, index):
         # type: (QModelIndex) -> None
