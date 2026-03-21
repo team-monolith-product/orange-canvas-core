@@ -540,7 +540,7 @@ class CategoryPopupMenu(FramelessWindow):
 
     def __onDragStarted(self, index):
         # type: (QModelIndex) -> None
-        from ..utils.wasm_drag import start_drag
+        from ..utils.drag import start_drag
 
         desc = index.data(QtWidgetRegistry.WIDGET_DESC_ROLE)
         icon = index.data(Qt.DecorationRole)

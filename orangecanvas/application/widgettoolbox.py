@@ -230,7 +230,7 @@ class WidgetToolGrid(ToolGrid):
         """
         Start a drag from button
         """
-        from ..utils.wasm_drag import start_drag
+        from ..utils.drag import start_drag
 
         action = button.defaultAction()
         desc = action.data()  # Widget Description
