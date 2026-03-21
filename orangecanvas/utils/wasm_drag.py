@@ -10,8 +10,10 @@ This works on all platforms — desktop and WASM alike.
 """
 from typing import Optional, Callable
 
-from AnyQt.QtWidgets import QApplication, QWidget
-from AnyQt.QtGui import QDragEnterEvent, QDragMoveEvent, QDragLeaveEvent, QDropEvent
+from AnyQt.QtWidgets import QApplication, QWidget, QLabel
+from AnyQt.QtGui import (
+    QDragEnterEvent, QDragMoveEvent, QDragLeaveEvent, QDropEvent, QPixmap,
+)
 from AnyQt.QtCore import (
     Qt, QObject, QEvent, QMimeData, QPoint, QPointF, QCoreApplication,
 )
@@ -50,9 +52,9 @@ def start_drag(
     default_action : Qt.DropAction
         The preferred action.
     pixmap : QPixmap, optional
-        Visual feedback during drag (reserved for future use).
+        Shown next to the cursor during the drag.
     hot_spot : QPoint, optional
-        Pixmap hotspot (reserved for future use).
+        Offset from the cursor to the pixmap's top-left corner.
     on_completed : callable(Qt.DropAction), optional
         Called when the drag finishes.
     """
@@ -94,6 +96,22 @@ class _DragSession(QObject):
         self._default_action = default_action
         self._on_completed = on_completed
         self._current_target: Optional[QWidget] = None
+        self._feedback: Optional[QLabel] = None
+
+        # Visual feedback: floating pixmap that follows the cursor
+        if pixmap is not None and not pixmap.isNull():
+            label = QLabel(
+                None,
+                Qt.WindowType.ToolTip
+                | Qt.WindowType.FramelessWindowHint
+                | Qt.WindowType.WindowStaysOnTopHint,
+            )
+            label.setPixmap(pixmap)
+            label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            label.resize(pixmap.size())
+            self._feedback = label
+            self._hot_spot = hot_spot or QPoint(0, 0)
+            # Position will be set on first MouseMove
 
         _DragSession._active = self
         QApplication.instance().installEventFilter(self)
@@ -107,6 +125,12 @@ class _DragSession(QObject):
 
         if etype == QEvent.Type.MouseMove:
             global_pos = event.globalPosition().toPoint()
+
+            if self._feedback is not None:
+                self._feedback.move(global_pos - self._hot_spot)
+                if not self._feedback.isVisible():
+                    self._feedback.show()
+
             target = self._drop_target_at(global_pos)
 
             if target is not self._current_target:
@@ -196,6 +220,10 @@ class _DragSession(QObject):
         app = QApplication.instance()
         if app is not None:
             app.removeEventFilter(self)
+        if self._feedback is not None:
+            self._feedback.close()
+            self._feedback.deleteLater()
+            self._feedback = None
         if self._current_target is not None:
             self._send_leave(self._current_target)
             self._current_target = None
