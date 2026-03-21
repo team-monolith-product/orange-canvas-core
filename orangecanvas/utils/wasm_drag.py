@@ -26,7 +26,7 @@ WASM_SOURCE_PROPERTY = "_wasm_drag_source"
 def start_drag(
     source: QWidget,
     mime_data: QMimeData,
-    supported_actions: Qt.DropActions = Qt.DropAction.CopyAction,
+    supported_actions: Qt.DropAction = Qt.DropAction.CopyAction,
     default_action: Qt.DropAction = Qt.DropAction.IgnoreAction,
     pixmap=None,
     hot_spot: Optional[QPoint] = None,
@@ -43,7 +43,7 @@ def start_drag(
         The widget initiating the drag.
     mime_data : QMimeData
         The payload.
-    supported_actions : Qt.DropActions
+    supported_actions : Qt.DropAction
         Allowed drop actions.
     default_action : Qt.DropAction
         The preferred action.
