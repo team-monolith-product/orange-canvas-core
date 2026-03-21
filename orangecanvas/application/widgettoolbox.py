@@ -6,6 +6,7 @@ Widget Tool Box
 A tool box with a tool grid for each category.
 
 """
+import sys
 from typing import Optional, Iterable, Any
 
 from AnyQt.QtWidgets import (
@@ -241,7 +242,12 @@ class WidgetToolGrid(ToolGrid):
         drag = QDrag(button)
         drag.setPixmap(icon.pixmap(self.iconSize()))
         drag.setMimeData(drag_data)
-        drag.exec(Qt.CopyAction)
+        result = drag.exec(Qt.CopyAction)
+        # WASM: QDrag.exec() returns IgnoreAction immediately because the
+        # HTML5 drag-and-drop bridge is not functional in Pyodide's
+        # single-threaded Emscripten build. Fall back to click-to-add.
+        if sys.platform == "emscripten" and result == Qt.DropAction.IgnoreAction:
+            self.actionTriggered.emit(action)
 
 
 class DragStartEventListener(QObject):

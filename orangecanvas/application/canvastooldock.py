@@ -562,9 +562,17 @@ class CategoryPopupMenu(FramelessWindow):
         filter = ToolTipEventFilter()
         viewport.installEventFilter(filter)
 
-        drag.exec(Qt.CopyAction)
+        result = drag.exec(Qt.CopyAction)
 
         viewport.removeEventFilter(filter)
+
+        # WASM: QDrag.exec() returns IgnoreAction immediately because the
+        # HTML5 drag-and-drop bridge is not functional in Pyodide's
+        # single-threaded Emscripten build. Fall back to click-to-add.
+        if sys.platform == "emscripten" and result == Qt.DropAction.IgnoreAction:
+            action = index.data(QtWidgetRegistry.WIDGET_ACTION_ROLE)
+            if action is not None:
+                self.triggered.emit(action)
 
     def eventFilter(self, obj, event):
         if isinstance(obj, QTreeView) and event.type() == QEvent.KeyPress:
