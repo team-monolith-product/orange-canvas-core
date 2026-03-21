@@ -239,15 +239,17 @@ class WidgetToolGrid(ToolGrid):
             "application/vnd.orange-canvas.registry.qualified-name",
             desc.qualified_name.encode("utf-8")
         )
+        if sys.platform == "emscripten":
+            # WASM: QDrag.exec() fatally aborts with "QEventLoop::
+            # WaitForMoreEvents is not supported without asyncify".
+            # Fall back to click-to-add (emit the same signal as a click).
+            self.actionTriggered.emit(action)
+            return
+
         drag = QDrag(button)
         drag.setPixmap(icon.pixmap(self.iconSize()))
         drag.setMimeData(drag_data)
-        result = drag.exec(Qt.CopyAction)
-        # WASM: QDrag.exec() returns IgnoreAction immediately because the
-        # HTML5 drag-and-drop bridge is not functional in Pyodide's
-        # single-threaded Emscripten build. Fall back to click-to-add.
-        if sys.platform == "emscripten" and result == Qt.DropAction.IgnoreAction:
-            self.actionTriggered.emit(action)
+        drag.exec(Qt.CopyAction)
 
 
 class DragStartEventListener(QObject):
