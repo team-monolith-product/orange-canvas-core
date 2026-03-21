@@ -1,26 +1,27 @@
 """
-Non-blocking drag-and-drop for WASM (Emscripten).
+Non-blocking drag-and-drop via synthetic events.
 
-On desktop, ``start_drag`` delegates to ``QDrag.exec()`` (blocking).
-On WASM, it uses ``_WasmDragSession`` which tracks the mouse via an
-application-level event filter and dispatches synthetic drag/drop events.
+Replaces ``QDrag.exec()`` (which enters a nested event loop) with mouse
+tracking through an application-level event filter.  On mouse release the
+session dispatches synthetic ``QDragEnterEvent`` / ``QDropEvent`` to the
+widget under the cursor.
+
+This works on all platforms — desktop and WASM alike.
 """
-import sys
 from typing import Optional, Callable
 
 from AnyQt.QtWidgets import QApplication, QWidget
-from AnyQt.QtGui import QDrag, QDragEnterEvent, QDragMoveEvent, QDragLeaveEvent, QDropEvent
+from AnyQt.QtGui import QDragEnterEvent, QDragMoveEvent, QDragLeaveEvent, QDropEvent
 from AnyQt.QtCore import (
     Qt, QObject, QEvent, QMimeData, QPoint, QPointF, QCoreApplication,
 )
 
-__all__ = ["start_drag"]
+__all__ = ["start_drag", "drag_source"]
 
-_WASM = sys.platform == "emscripten"
-
-# Property key used to carry the source widget reference in WASM synthetic
-# events (QDropEvent.source() returns None without a real QDrag).
-WASM_SOURCE_PROPERTY = "_wasm_drag_source"
+# Property key that carries the source widget reference on the QMimeData.
+# QDropEvent.source() only works with a real QDrag; our synthetic events
+# use this property instead.
+_SOURCE_PROPERTY = "_drag_source"
 
 
 def start_drag(
@@ -31,11 +32,12 @@ def start_drag(
     pixmap=None,
     hot_spot: Optional[QPoint] = None,
     on_completed: Optional[Callable] = None,
-) -> Qt.DropAction:
+) -> None:
     """Start a drag-and-drop operation.
 
-    On desktop this is a blocking wrapper around ``QDrag.exec()``.
-    On WASM it starts an asynchronous drag session and returns immediately.
+    The function returns immediately.  When the user releases the mouse
+    (or presses Escape), *on_completed* is called with the resulting
+    ``Qt.DropAction``.
 
     Parameters
     ----------
@@ -48,63 +50,43 @@ def start_drag(
     default_action : Qt.DropAction
         The preferred action.
     pixmap : QPixmap, optional
-        Visual feedback during drag (currently unused on WASM).
+        Visual feedback during drag (reserved for future use).
     hot_spot : QPoint, optional
-        Pixmap hotspot.
+        Pixmap hotspot (reserved for future use).
     on_completed : callable(Qt.DropAction), optional
-        Called when the drag finishes.  On desktop this is invoked
-        synchronously before ``start_drag`` returns.
-
-    Returns
-    -------
-    Qt.DropAction
-        The result on desktop; ``Qt.IgnoreAction`` on WASM (the real
-        result is delivered via *on_completed*).
+        Called when the drag finishes.
     """
-    if _WASM:
-        mime_data.setProperty(WASM_SOURCE_PROPERTY, source)
-        _WasmDragSession(
-            source, mime_data, supported_actions, default_action,
-            pixmap, hot_spot, on_completed,
-        )
-        return Qt.DropAction.IgnoreAction
-    else:
-        drag = QDrag(source)
-        drag.setMimeData(mime_data)
-        if pixmap is not None and not pixmap.isNull():
-            drag.setPixmap(pixmap)
-        if hot_spot is not None:
-            drag.setHotSpot(hot_spot)
-        result = drag.exec(supported_actions, default_action)
-        if on_completed is not None:
-            on_completed(result)
-        return result
+    mime_data.setProperty(_SOURCE_PROPERTY, source)
+    _DragSession(
+        source, mime_data, supported_actions, default_action,
+        pixmap, hot_spot, on_completed,
+    )
 
 
-def wasm_drag_source(event) -> Optional[QWidget]:
-    """Retrieve the drag source from a synthetic WASM drop event.
+def drag_source(event) -> Optional[QWidget]:
+    """Retrieve the drag source widget from a drop event.
 
-    On desktop ``event.source()`` already works; use this helper when
-    you need to handle both paths::
+    ``QDropEvent.source()`` only works with a real ``QDrag``.  Since
+    ``start_drag`` uses synthetic events, use this helper instead::
 
-        source = event.source() or wasm_drag_source(event)
+        source = event.source() or drag_source(event)
     """
-    prop = event.mimeData().property(WASM_SOURCE_PROPERTY)
+    prop = event.mimeData().property(_SOURCE_PROPERTY)
     if isinstance(prop, QWidget):
         return prop
     return None
 
 
-class _WasmDragSession(QObject):
-    """Mouse-tracking drag session for WASM."""
+class _DragSession(QObject):
+    """Mouse-tracking drag session."""
 
-    _active: Optional["_WasmDragSession"] = None
+    _active: Optional["_DragSession"] = None
 
     def __init__(self, source, mime_data, supported_actions, default_action,
                  pixmap, hot_spot, on_completed):
         super().__init__()
-        if _WasmDragSession._active is not None:
-            _WasmDragSession._active._cancel()
+        if _DragSession._active is not None:
+            _DragSession._active._cancel()
 
         self._source = source
         self._mime_data = mime_data
@@ -113,7 +95,7 @@ class _WasmDragSession(QObject):
         self._on_completed = on_completed
         self._current_target: Optional[QWidget] = None
 
-        _WasmDragSession._active = self
+        _DragSession._active = self
         QApplication.instance().installEventFilter(self)
 
     # ------------------------------------------------------------------
@@ -219,7 +201,7 @@ class _WasmDragSession(QObject):
             self._current_target = None
         if self._on_completed is not None:
             self._on_completed(result)
-        _WasmDragSession._active = None
+        _DragSession._active = None
         self.deleteLater()
 
     def _cancel(self) -> None:
