@@ -11,7 +11,7 @@ from AnyQt.QtWidgets import (
     QToolButton, QTreeView
 )
 from AnyQt.QtGui import (
-    QPalette, QBrush, QDrag, QResizeEvent, QHideEvent, QPaintEvent
+    QPalette, QBrush, QResizeEvent, QHideEvent, QPaintEvent
 )
 from AnyQt.QtCore import (
     Qt, QSize, QObject, QPropertyAnimation, QEvent, QRect, QPoint,
@@ -540,15 +540,7 @@ class CategoryPopupMenu(FramelessWindow):
 
     def __onDragStarted(self, index):
         # type: (QModelIndex) -> None
-        if sys.platform == "emscripten":
-            # WASM: QDrag.exec() fatally aborts with "QEventLoop::
-            # WaitForMoreEvents is not supported without asyncify".
-            # Fall back to click-to-add (emit the same signal as a click).
-            action = index.data(QtWidgetRegistry.WIDGET_ACTION_ROLE)
-            if action is not None:
-                self.triggered.emit(action)
-            self.hide()
-            return
+        from ..utils.wasm_drag import start_drag
 
         desc = index.data(QtWidgetRegistry.WIDGET_DESC_ROLE)
         icon = index.data(Qt.DecorationRole)
@@ -558,9 +550,6 @@ class CategoryPopupMenu(FramelessWindow):
             "application/vnd.orange-canvas.registry.qualified-name",
             desc.qualified_name.encode('utf-8')
         )
-        drag = QDrag(self)
-        drag.setPixmap(icon.pixmap(38))
-        drag.setMimeData(drag_data)
 
         # TODO: Should animate (accept) hide.
         self.hide()
@@ -572,9 +561,16 @@ class CategoryPopupMenu(FramelessWindow):
         filter = ToolTipEventFilter()
         viewport.installEventFilter(filter)
 
-        drag.exec(Qt.CopyAction)
+        def cleanup(action):
+            viewport.removeEventFilter(filter)
 
-        viewport.removeEventFilter(filter)
+        start_drag(
+            source=self,
+            mime_data=drag_data,
+            supported_actions=Qt.CopyAction,
+            pixmap=icon.pixmap(38),
+            on_completed=cleanup,
+        )
 
     def eventFilter(self, obj, event):
         if isinstance(obj, QTreeView) and event.type() == QEvent.KeyPress:

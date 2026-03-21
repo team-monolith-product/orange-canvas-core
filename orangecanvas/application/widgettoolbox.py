@@ -6,7 +6,6 @@ Widget Tool Box
 A tool box with a tool grid for each category.
 
 """
-import sys
 from typing import Optional, Iterable, Any
 
 from AnyQt.QtWidgets import (
@@ -14,7 +13,7 @@ from AnyQt.QtWidgets import (
     QWidget, QLineEdit
 )
 from AnyQt.QtGui import (
-    QDrag, QPalette, QBrush, QIcon, QColor, QGradient, QActionEvent,
+    QPalette, QBrush, QIcon, QColor, QGradient, QActionEvent,
     QMouseEvent
 )
 from AnyQt.QtCore import (
@@ -231,6 +230,8 @@ class WidgetToolGrid(ToolGrid):
         """
         Start a drag from button
         """
+        from ..utils.wasm_drag import start_drag
+
         action = button.defaultAction()
         desc = action.data()  # Widget Description
         icon = action.icon()
@@ -239,17 +240,12 @@ class WidgetToolGrid(ToolGrid):
             "application/vnd.orange-canvas.registry.qualified-name",
             desc.qualified_name.encode("utf-8")
         )
-        if sys.platform == "emscripten":
-            # WASM: QDrag.exec() fatally aborts with "QEventLoop::
-            # WaitForMoreEvents is not supported without asyncify".
-            # Fall back to click-to-add (emit the same signal as a click).
-            self.actionTriggered.emit(action)
-            return
-
-        drag = QDrag(button)
-        drag.setPixmap(icon.pixmap(self.iconSize()))
-        drag.setMimeData(drag_data)
-        drag.exec(Qt.CopyAction)
+        start_drag(
+            source=button,
+            mime_data=drag_data,
+            supported_actions=Qt.CopyAction,
+            pixmap=icon.pixmap(self.iconSize()),
+        )
 
 
 class DragStartEventListener(QObject):
