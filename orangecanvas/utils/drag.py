@@ -10,7 +10,7 @@ This works on all platforms — desktop and WASM alike.
 """
 from typing import Optional, Callable
 
-from AnyQt.QtWidgets import QApplication, QWidget, QLabel
+from AnyQt.QtWidgets import QApplication, QWidget, QLabel, QAbstractScrollArea
 from AnyQt.QtGui import (
     QDragEnterEvent, QDragMoveEvent, QDragLeaveEvent, QDropEvent, QPixmap,
 )
@@ -209,7 +209,15 @@ class _DragSession(QObject):
         while widget is not None:
             if widget.acceptDrops():
                 return widget
-            widget = widget.parentWidget()
+            # QAbstractScrollArea viewports proxy events to the scroll area
+            # via viewportEvent().  The viewport itself may not have
+            # acceptDrops=True, but sending drag events to it still works
+            # because the scroll area (e.g. QGraphicsView) handles them.
+            parent = widget.parentWidget()
+            if (isinstance(parent, QAbstractScrollArea)
+                    and parent.viewport() is widget):
+                return widget
+            widget = parent
         return None
 
     # ------------------------------------------------------------------
