@@ -206,6 +206,24 @@ class _DragSession(QObject):
     @staticmethod
     def _drop_target_at(global_pos: QPoint) -> Optional[QWidget]:
         widget = QApplication.widgetAt(global_pos)
+        if widget is None:
+            # QApplication.widgetAt() fails on WASM (Qt platform plugin
+            # limitation).  Fall back to manual traversal: find the
+            # top-level window containing the point, then walk down
+            # via childAt().
+            for w in QApplication.topLevelWidgets():
+                if not w.isVisible():
+                    continue
+                if w.testAttribute(
+                        Qt.WidgetAttribute.WA_TransparentForMouseEvents):
+                    continue
+                local = w.mapFromGlobal(global_pos)
+                if w.rect().contains(local):
+                    child = w.childAt(local)
+                    widget = child if child is not None else w
+                    break
+        if widget is None:
+            return None
         while widget is not None:
             if widget.acceptDrops():
                 return widget
