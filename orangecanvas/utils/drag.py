@@ -13,6 +13,7 @@ from typing import Optional, Callable, Tuple
 from AnyQt.QtWidgets import QApplication, QWidget, QLabel, QAbstractScrollArea
 from AnyQt.QtGui import (
     QDragEnterEvent, QDragMoveEvent, QDragLeaveEvent, QDropEvent, QPixmap,
+    QWindow,
 )
 from AnyQt.QtCore import (
     Qt, QObject, QEvent, QMimeData, QPoint, QPointF, QCoreApplication,
@@ -218,15 +219,25 @@ class _DragSession(QObject):
     ) -> Tuple[Optional[QWidget], QPoint]:
         """Find the drop target using window-relative coordinates.
 
-        Uses ``QWidget.mapTo(window)`` instead of global coordinates,
-        because ``mapToGlobal()`` returns wrong values on WASM.
+        On WASM the application event filter receives events where *obj*
+        is a ``QWindow`` (not a ``QWidget``), because the platform plugin
+        delivers events at the window level.  In that case we look up the
+        corresponding top-level ``QWidget`` and use *event_pos* directly
+        as a position inside that widget (the coordinate spaces coincide).
         """
-        if not isinstance(obj, QWidget):
+        if isinstance(obj, QWidget):
+            window = obj.window()
+            if window is None:
+                return None, QPoint()
+            pos_in_window = obj.mapTo(window, event_pos)
+        elif isinstance(obj, QWindow):
+            # QWindow → find the QWidget that owns this window.
+            window = QWidget.find(obj.winId())
+            if window is None:
+                return None, QPoint()
+            pos_in_window = event_pos
+        else:
             return None, QPoint()
-        window = obj.window()
-        if window is None:
-            return None, QPoint()
-        pos_in_window = obj.mapTo(window, event_pos)
         child = window.childAt(pos_in_window)
         if child is None:
             return None, QPoint()
