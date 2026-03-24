@@ -8,7 +8,7 @@ widget under the cursor.
 
 This works on all platforms — desktop and WASM alike.
 """
-from typing import Optional, Callable
+from typing import Optional, Callable, Tuple
 
 from AnyQt.QtWidgets import QApplication, QWidget, QLabel, QAbstractScrollArea
 from AnyQt.QtGui import (
@@ -79,6 +79,19 @@ def drag_source(event) -> Optional[QWidget]:
     return None
 
 
+def _walk_up_to_drop_target(widget: QWidget) -> Optional[QWidget]:
+    """Walk up the parent chain to find a widget that accepts drops."""
+    while widget is not None:
+        if widget.acceptDrops():
+            return widget
+        parent = widget.parentWidget()
+        if (isinstance(parent, QAbstractScrollArea)
+                and parent.viewport() is widget):
+            return widget
+        widget = parent
+    return None
+
+
 class _DragSession(QObject):
     """Mouse-tracking drag session."""
 
@@ -131,26 +144,22 @@ class _DragSession(QObject):
                 if not self._feedback.isVisible():
                     self._feedback.show()
 
-            target = self._drop_target_at(global_pos)
+            target, local = self._resolve_target(obj, event.position().toPoint())
 
             if target is not self._current_target:
                 if self._current_target is not None:
                     self._send_leave(self._current_target)
                 if target is not None:
-                    local = target.mapFromGlobal(global_pos)
                     self._send_enter(target, local)
                 self._current_target = target
             elif target is not None:
-                local = target.mapFromGlobal(global_pos)
                 self._send_move(target, local)
 
             return True
 
         if etype == QEvent.Type.MouseButtonRelease:
-            global_pos = event.globalPosition().toPoint()
-            target = self._drop_target_at(global_pos)
+            target, local = self._resolve_target(obj, event.position().toPoint())
             if target is not None:
-                local = target.mapFromGlobal(global_pos)
                 if target is not self._current_target:
                     self._send_enter(target, local)
                 result = self._send_drop(target, local)
@@ -204,39 +213,28 @@ class _DragSession(QObject):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _drop_target_at(global_pos: QPoint) -> Optional[QWidget]:
-        widget = QApplication.widgetAt(global_pos)
-        if widget is None:
-            # QApplication.widgetAt() fails on WASM (Qt platform plugin
-            # limitation).  Fall back to manual traversal: find the
-            # top-level window containing the point, then walk down
-            # via childAt().
-            for w in QApplication.topLevelWidgets():
-                if not w.isVisible():
-                    continue
-                if w.testAttribute(
-                        Qt.WidgetAttribute.WA_TransparentForMouseEvents):
-                    continue
-                local = w.mapFromGlobal(global_pos)
-                if w.rect().contains(local):
-                    child = w.childAt(local)
-                    widget = child if child is not None else w
-                    break
-        if widget is None:
-            return None
-        while widget is not None:
-            if widget.acceptDrops():
-                return widget
-            # QAbstractScrollArea viewports proxy events to the scroll area
-            # via viewportEvent().  The viewport itself may not have
-            # acceptDrops=True, but sending drag events to it still works
-            # because the scroll area (e.g. QGraphicsView) handles them.
-            parent = widget.parentWidget()
-            if (isinstance(parent, QAbstractScrollArea)
-                    and parent.viewport() is widget):
-                return widget
-            widget = parent
-        return None
+    def _resolve_target(
+        obj: QObject, event_pos: QPoint,
+    ) -> Tuple[Optional[QWidget], QPoint]:
+        """Find the drop target using window-relative coordinates.
+
+        Uses ``QWidget.mapTo(window)`` instead of global coordinates,
+        because ``mapToGlobal()`` returns wrong values on WASM.
+        """
+        if not isinstance(obj, QWidget):
+            return None, QPoint()
+        window = obj.window()
+        if window is None:
+            return None, QPoint()
+        pos_in_window = obj.mapTo(window, event_pos)
+        child = window.childAt(pos_in_window)
+        if child is None:
+            return None, QPoint()
+        target = _walk_up_to_drop_target(child)
+        if target is None:
+            return None, QPoint()
+        local = target.mapFrom(window, pos_in_window)
+        return target, local
 
     # ------------------------------------------------------------------
     # Lifecycle
